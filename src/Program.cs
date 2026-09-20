@@ -305,7 +305,7 @@ namespace KeyColor
 
         public DebugWindow()
         {
-            Text = "MIDI debug terminal";
+            Text = "MIDI debug terminal - Send Only";
             ClientSize = new Size(880, 460);
             Font = new Font("Consolas", 9f);
 
@@ -372,7 +372,7 @@ namespace KeyColor
 
         public MainForm()
         {
-            Text = "KeyPainter";
+            Text = "KeyColor";
             ClientSize = new Size(680, 470);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
