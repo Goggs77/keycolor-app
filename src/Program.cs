@@ -384,7 +384,7 @@ namespace KeyColor
         public MainForm()
         {
             Text = "KeyColor";
-            ClientSize = new Size(680, 470);
+            ClientSize = new Size(680, 400);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
 
