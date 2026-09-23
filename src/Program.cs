@@ -11,6 +11,12 @@
 //   addr 3 = right half (29 keys, global 24..52), addr 4 = left half (0..23)
 //
 // Slot 0 is never written - on this hardware that replaces the built-in skin.
+//
+// The keyboard's palette has 29 entries, of which slot 0 is off, so a cycle longer
+// than 28 keys works as long as it holds no more than 28 *different* colours:
+// repeated colours share a slot and black costs nothing. That is what lets a
+// quarter-tone or 31-EDO scale, whose steps do not line up with the keys, use one
+// entry per step over the whole instrument.
 
 using System;
 using System.Collections.Generic;
@@ -359,16 +365,21 @@ namespace KeyColor
         };
 
         private const int TotalKeys = 53;
+        private const int MaxSlots = 28;      // palette entries minus slot 0, which is off
 
         private readonly MidiOut midi = new MidiOut();
-        private Color[] palette = new Color[0];
+        private Color[] palette = new Color[0];   // one colour per entry of the cycle
+        private Color[] slots = new Color[0];     // the different colours, uploaded to slots 1..N
+        private byte[] entrySlot = new byte[0];   // palette slot per entry, 0 = off
         private Color[] fileColors;          // palette loaded from a text file (null = generated)
         private string fileSource = "generated";
+        private bool powerSave => loPowerOption.Checked;
 
         private ComboBox portBox;
         private NumericUpDown periodBox, startKeyBox, hueStartBox, hueStepBox, satBox, valBox;
         private Panel preview;
         private Label status, sourceLabel, hueStepLabel;
+        private CheckBox loPowerOption;
 
         public MainForm()
         {
@@ -386,10 +397,11 @@ namespace KeyColor
 
             y += 34;
             AddLabel("Period (keys per cycle)", 12, y);
-            periodBox = AddNumber(185, y, 60, 1, 28, 12);
-            AddLabel("Start key (0-52)", 265, y);
+            periodBox = AddNumber(185, y, 60, 1, TotalKeys, 12);
+            AddLabel("Start key (0-52)", 265, y);//265-12 = 253, 253+265=518
             startKeyBox = AddNumber(390, y, 60, 0, 52, 0);
-
+            AddLabel("Save Power", 477, y);
+            loPowerOption = AddCheckBox(560, y, 37);
             y += 34;
             AddLabel("Hue start (deg)", 12, y);
             hueStartBox = AddNumber(185, y, 60, 0, 359, 0);
@@ -412,7 +424,6 @@ namespace KeyColor
             Controls.Add(sourceLabel);
             y += 56;
 
-            y += 42;
             preview = new Panel { Location = new Point(12, y), Size = new Size(650, 130), BorderStyle = BorderStyle.FixedSingle };
             preview.Paint += (s, e) => DrawPreview(e.Graphics);
             Controls.Add(preview);
@@ -436,6 +447,14 @@ namespace KeyColor
         private ComboBox AddCombo(int x, int y, int width)
         {
             var box = new ComboBox { Location = new Point(x, y), Width = width, DropDownStyle = ComboBoxStyle.DropDownList };
+            Controls.Add(box);
+            return box;
+        }
+
+        private CheckBox AddCheckBox(int x, int y, int width)
+        {
+            var box = new CheckBox { Location = new Point(x, y), Width = width };
+            box.Click += (s, e) => { BuildPalette(); preview.Invalidate(); };
             Controls.Add(box);
             return box;
         }
@@ -489,12 +508,15 @@ namespace KeyColor
         ///                   (S' = S * box/100, V' = V * box/100), then interpolated
         ///                   linearly in HSV so the first colour lands on the first key
         ///                   and the last colour on the last key of the period.
+        ///
+        /// Either way the entries are then folded into palette slots by AssignSlots.
         /// </summary>
         private void BuildPalette()
         {
             int period = (int)periodBox.Value;
+            double powerSaveCoeff = powerSave ? 10.0 : 1.0;
             double scaleS = (double)satBox.Value / 100.0;
-            double scaleV = (double)valBox.Value / 100.0;
+            double scaleV = (double)valBox.Value / 100.0  / powerSaveCoeff;
             double hueOffset = (double)hueStartBox.Value;
 
             palette = new Color[period];
@@ -515,12 +537,35 @@ namespace KeyColor
                     // file mode: Hue Start rotates the file's hues, S and V are scale factors
                     palette[i] = Hsv.FromHsv(h + hueOffset, Hsv.Clamp01(s * scaleS), Hsv.Clamp01(v * scaleV));
                 }
+                AssignSlots();
                 return;
             }
 
             double hue = (double)hueStartBox.Value;
             double step = (double)hueStepBox.Value;
             for (int i = 0; i < period; i++) palette[i] = Hsv.FromHsv(hue + i * step, scaleS, scaleV);
+            AssignSlots();
+        }
+
+        /// <summary>
+        /// Give every entry of the cycle a slot on the device. The palette holds 29
+        /// entries and slot 0 is off, so black entries become slot 0 and entries that
+        /// share a colour share a slot; only the number of different colours is capped.
+        /// </summary>
+        private void AssignSlots()
+        {
+            var colours = new List<Color>();
+            entrySlot = new byte[palette.Length];
+            for (int i = 0; i < palette.Length; i++)
+            {
+                Color c = palette[i];
+                if (c.R == 0 && c.G == 0 && c.B == 0) { entrySlot[i] = 0; continue; }
+
+                int at = colours.IndexOf(c);
+                if (at < 0) { colours.Add(c); at = colours.Count - 1; }
+                entrySlot[i] = (byte)(at + 1);
+            }
+            slots = colours.ToArray();
         }
 
         // ------------------------------------------------------------- palette file
@@ -551,18 +596,27 @@ namespace KeyColor
                     return;
                 }
 
+                if (found.Count > TotalKeys)
+                {
+                    status.Text = string.Format(
+                        "{0} has {1} colours; a cycle can be at most {2} keys (the length of the keyboard)",
+                        System.IO.Path.GetFileName(dialog.FileName), found.Count, TotalKeys);
+                    return;
+                }
+
                 fileColors = found.ToArray();
                 fileSource = string.Format("{0} ({1} colours)", System.IO.Path.GetFileName(dialog.FileName), found.Count);
                 sourceLabel.Text = "source: " + fileSource;
                 hueStepBox.Enabled = false;                  // hue per key has no meaning for a file
                 hueStepLabel.ForeColor = SystemColors.GrayText;
 
-                // one key per loaded colour unless that exceeds the 28-entry palette
-                periodBox.Value = Math.Min(28, Math.Max(1, found.Count));
+                // one key per loaded colour - a scale file has one per step of its tuning
+                periodBox.Value = Math.Min(TotalKeys, Math.Max(1, found.Count));
                 BuildPalette();
                 preview.Invalidate();
                 status.Text = string.Format(
-                    "loaded {0} colours; Hue Start rotates them, S and V scale them, Hue per key is unused", found.Count);
+                    "loaded {0} colours -> period {1}, {2} palette entries in use; Hue Start rotates them, S and V scale them",
+                    found.Count, palette.Length, slots.Length);
             }
         }
 
@@ -600,8 +654,8 @@ namespace KeyColor
 
         private void SendPalette(byte address)
         {
-            var frame = new List<byte> { 0xF0, address, 0x1E, (byte)palette.Length, 0x01 };
-            foreach (Color c in palette)
+            var frame = new List<byte> { 0xF0, address, 0x1E, (byte)slots.Length, 0x01 };
+            foreach (Color c in slots)
             {
                 frame.Add(Hsv.ToSevenBit(c.R));
                 frame.Add(Hsv.ToSevenBit(c.G));
@@ -617,7 +671,7 @@ namespace KeyColor
             for (int k = 0; k < keyCount; k++)
             {
                 frame.Add((byte)k);
-                frame.Add(palette.Length == 0 ? (byte)0 : (byte)(IndexFor(globalBase + k) + 1));
+                frame.Add(entrySlot.Length == 0 ? (byte)0 : entrySlot[IndexFor(globalBase + k)]);
             }
             frame.Add(0xF7);
             midi.Send(frame.ToArray());
@@ -630,12 +684,20 @@ namespace KeyColor
             if (portBox.SelectedIndex < 0) { status.Text = "no MIDI port selected"; return; }
 
             BuildPalette();
+            if (slots.Length > MaxSlots)
+            {
+                status.Text = string.Format(
+                    "this cycle uses {0} different colours; the keyboard holds {1} - shorten the period or use fewer colours",
+                    slots.Length, MaxSlots);
+                return;
+            }
+
             try
             {
                 midi.Open(portBox.SelectedIndex);
                 foreach (var half in halves)
                 {
-                    SendPalette(half.Address);
+                    if (slots.Length > 0) SendPalette(half.Address);
                     Thread.Sleep(40);
                     SendLamps(half.Address, half.Keys, half.Base);
                     Thread.Sleep(40);
@@ -653,8 +715,8 @@ namespace KeyColor
 
             preview.Invalidate();
             status.Text = string.Format(
-                "applied - source {0}, period {1} keys from start key {2}, S {3}%, V {4}%",
-                fileSource, palette.Length, startKeyBox.Value, satBox.Value, valBox.Value);
+                "applied - source {0}, period {1} keys from start key {2}, {3} palette entries, S {4}%, V {5}%",
+                fileSource, palette.Length, startKeyBox.Value, slots.Length, satBox.Value, valBox.Value);
         }
 
         private void ClearKeyboard()
@@ -695,11 +757,11 @@ namespace KeyColor
             if (palette.Length == 0) BuildPalette();
             g.Clear(Color.FromArgb(24, 24, 28));
 
-            // palette swatches
-            int swatch = Math.Max(4, 620 / Math.Max(1, palette.Length));
-            for (int i = 0; i < palette.Length; i++)
+            // the palette entries the device will hold, in slot order
+            int swatch = Math.Max(4, 620 / Math.Max(1, slots.Length));
+            for (int i = 0; i < slots.Length; i++)
             {
-                using (var brush = new SolidBrush(palette[i]))
+                using (var brush = new SolidBrush(slots[i]))
                     g.FillRectangle(brush, 10 + i * swatch, 8, swatch - 2, 26);
             }
 
@@ -714,7 +776,9 @@ namespace KeyColor
             using (var pen = new Pen(Color.DimGray))
                 g.DrawLine(pen, 10 + 24 * keyWidth, 44, 10 + 24 * keyWidth, 96);   // seam between halves
             g.DrawString(
-                string.Format("keys 0..52 (left 0-23 | right 24-52); entry 0 at start key {0}", startKeyBox.Value),
+                string.Format(
+                    "keys 0..52 (left 0-23 | right 24-52); entry 0 at start key {0}; period {1}, {2} of {3} palette entries",
+                    startKeyBox.Value, palette.Length, slots.Length, MaxSlots),
                 SystemFonts.DefaultFont, Brushes.LightGray, 10, 100);
         }
     }
