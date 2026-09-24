@@ -201,6 +201,13 @@ namespace KeyColor
         {
             return v < 0 ? 0 : v > 1 ? 1 : v;
         }
+
+        public static Color Brighten(Color color, double factor)
+        {
+            double h, s, v;
+            ToHsv(color, out h, out s, out v);
+            return FromHsv(h, s, Clamp01(v * factor));
+        }
     }
 
     // --------------------------------------------------------------- MIDI monitor
@@ -514,7 +521,7 @@ namespace KeyColor
         private void BuildPalette()
         {
             int period = (int)periodBox.Value;
-            double powerSaveCoeff = powerSave ? 10.0 : 1.0;
+            double powerSaveCoeff = powerSave ? 6.0 : 1.0;
             double scaleS = (double)satBox.Value / 100.0;
             double scaleV = (double)valBox.Value / 100.0  / powerSaveCoeff;
             double hueOffset = (double)hueStartBox.Value;
@@ -757,11 +764,12 @@ namespace KeyColor
             if (palette.Length == 0) BuildPalette();
             g.Clear(Color.FromArgb(24, 24, 28));
 
+            var compensation = powerSave ? 4.0 : 1.0; //doing the reverse, since this is from send values
             // the palette entries the device will hold, in slot order
             int swatch = Math.Max(4, 620 / Math.Max(1, slots.Length));
             for (int i = 0; i < slots.Length; i++)
             {
-                using (var brush = new SolidBrush(slots[i]))
+                using (var brush = new SolidBrush(Hsv.Brighten(slots[i], compensation)))
                     g.FillRectangle(brush, 10 + i * swatch, 8, swatch - 2, 26);
             }
 
@@ -769,7 +777,7 @@ namespace KeyColor
             int keyWidth = 640 / TotalKeys;
             for (int k = 0; k < TotalKeys; k++)
             {
-                using (var brush = new SolidBrush(ColorFor(k)))
+                using (var brush = new SolidBrush(Hsv.Brighten(ColorFor(k), compensation)))
                     g.FillRectangle(brush, 10 + k * keyWidth, 48, keyWidth - 1, 44);
             }
 
